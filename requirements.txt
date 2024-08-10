@@ -1,0 +1,9 @@
+pypdf
+langchain
+langchain-community
+# langchain-chroma
+chromadb==0.3.29
+pytest
+fastapi
+python-dotenv
+python-multipart
