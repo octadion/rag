@@ -7,3 +7,4 @@ pytest
 fastapi
 python-dotenv
 python-multipart
+psycopg2

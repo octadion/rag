@@ -6,8 +6,16 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain.schema.document import Document
 from embedding import get_embedding_function
 from langchain.vectorstores.chroma import Chroma
-
-
+from fastapi import HTTPException
+import psycopg2
+def get_db_connection():
+    return psycopg2.connect(
+        dbname=os.getenv("POSTGRES_DBNAME"),
+        user=os.getenv("POSTGRES_USER"),
+        password=os.getenv("POSTGRES_PASSWORD"),
+        host=os.getenv("POSTGRES_HOST"),
+        port=os.getenv("POSTGRES_PORT")
+    )
 CHROMA_PATH = "chroma"
 DATA_PATH = "data"
 
@@ -25,8 +33,8 @@ def main():
     add_to_chroma(chunks)
 
 
-def load_documents():
-    document_loader = PyPDFDirectoryLoader(DATA_PATH)
+def load_documents(file_location: str):
+    document_loader = PyPDFDirectoryLoader(file_location)
     return document_loader.load()
 
 
@@ -60,12 +68,12 @@ def calculate_chunk_ids(chunks):
 
     return chunks
 
-def add_to_chroma(chunks: list[Document]):
+def add_to_chroma(chunks: list[Document], vector_db_location: str):
     try:
         db = Chroma(
-            persist_directory=CHROMA_PATH, embedding_function=get_embedding_function()
+            persist_directory=vector_db_location, embedding_function=get_embedding_function()
         )
-
+        print(vector_db_location)
         chunks_with_ids = calculate_chunk_ids(chunks)
 
         existing_items = db.get(include=[])
@@ -95,9 +103,29 @@ def add_to_chroma(chunks: list[Document]):
     except Exception as e:
         print(f"Error in add_to_chroma: {e}")
         
-def clear_database():
-    if os.path.exists(CHROMA_PATH):
-        shutil.rmtree(CHROMA_PATH)
+def clear_database(vector_db_id: str):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("SELECT vector_db_location FROM files WHERE vector_db_id = %s", (vector_db_id,))
+    vector_db_location = cursor.fetchone()
+
+    if vector_db_location is None:
+        cursor.close()
+        conn.close()
+        raise HTTPException(status_code=404, detail="Vector DB location not found")
+
+    folder_path = vector_db_location[0]
+    if os.path.isdir(folder_path):
+        shutil.rmtree(folder_path)
+    else:
+        os.remove(folder_path)
+
+    cursor.execute("DELETE FROM files WHERE vector_db_id = %s", (vector_db_id,))
+    conn.commit()
+
+    cursor.close()
+    conn.close()
 
 
 if __name__ == "__main__":
