@@ -40,8 +40,8 @@ async def reset_database(request: ResetDatabaseRequest, vector_db_id: str = Quer
         conn.close()
         
         clear_database(vector_db_id)
-        return {"message": f"Database cleared for vector_db_id {vector_db_id}"}
-    return {"message": "Reset flag not set"}
+        return {"message": f"Database cleared for vector_db_id {vector_db_id}", "vector_db_id": vector_db_id}
+    return {"message": "Reset flag not set", "vector_db_id": vector_db_id}
 
 @app.post("/api/v1/update-database")
 async def update_database(file_name: str, file_id: str, vector_db_id: str):
@@ -60,7 +60,7 @@ async def update_database(file_name: str, file_id: str, vector_db_id: str):
     conn.close()
 
     run_update_database(file_name, file_id, file_location, vector_db_id, vector_db_location)
-    return {"message": "Database update initiated"}
+    return {"message": "Database update initiated", "vector_db_id": vector_db_id}
 
 def run_update_database(file_name, file_id, file_location, vector_db_id, vector_db_location):
     try:
@@ -82,28 +82,28 @@ def run_update_database(file_name, file_id, file_location, vector_db_id, vector_
     except Exception as e:
         print(f"Error updating database: {e}")
 
-@app.post("/api/v1/upload-file")
-async def upload_file(file: UploadFile = File(...)):
-    file_id = str(uuid.uuid4())
-    vector_db_id = str(uuid.uuid4())
+# @app.post("/api/v1/upload-file")
+# async def upload_file(file: UploadFile = File(...)):
+#     file_id = str(uuid.uuid4())
+#     vector_db_id = str(uuid.uuid4())
 
-    file_folder = os.path.join(CHUNK_PATH, file_id)
-    vector_db_folder = os.path.join(CHUNK_PATH, vector_db_id)
+#     file_folder = os.path.join(CHUNK_PATH, file_id)
+#     vector_db_folder = os.path.join(CHUNK_PATH, vector_db_id)
     
-    file_location = os.path.join(file_folder, file.filename)
-    vector_db_location = os.path.join(vector_db_folder, "CHROMA")
+#     file_location = os.path.join(file_folder, file.filename)
+#     vector_db_location = os.path.join(vector_db_folder, "CHROMA")
 
-    os.makedirs(file_folder, exist_ok=True)
-    os.makedirs(vector_db_folder, exist_ok=True)
+#     os.makedirs(file_folder, exist_ok=True)
+#     os.makedirs(vector_db_folder, exist_ok=True)
 
-    with open(file_location, "wb") as f:
-        shutil.copyfileobj(file.file, f)
+#     with open(file_location, "wb") as f:
+#         shutil.copyfileobj(file.file, f)
     
-    if file.filename.endswith('.pdf'):
-        run_update_database(file.filename, file_id, file_location, vector_db_id, vector_db_location)
-        return {"message": "File uploaded and database update initiated"}
-    else:
-        return {"message": "File uploaded but not processed. Only PDF files are supported."}
+#     if file.filename.endswith('.pdf'):
+#         run_update_database(file.filename, file_id, file_location, vector_db_id, vector_db_location)
+#         return {"message": "File uploaded and database update initiated"}
+#     else:
+#         return {"message": "File uploaded but not processed. Only PDF files are supported."}
     
 @app.post("/api/v1/upload-files")
 async def upload_files(files: List[UploadFile] = File(...)):
@@ -138,7 +138,7 @@ async def upload_files(files: List[UploadFile] = File(...)):
     all_file_locations = [os.path.join(CHUNK_PATH, file_id, file.filename) for file_id, file in zip(file_ids, files)]
     run_update_database_multi(all_file_locations, vector_db_id, vector_db_location)
 
-    return {"message": "Files uploaded and database update initiated"}
+    return {"message": "Files uploaded and database update initiated", "vector_db_id": vector_db_id}
 
 def run_update_database_multi(file_locations, vector_db_id, vector_db_location):
     try:
@@ -192,6 +192,19 @@ async def list_files():
     conn.close()
 
     return [f"{file_id}: {file_name}" for file_id, file_name in files]
+
+@app.get("/api/v1/list-vector-db-ids", response_model=List[str])
+async def list_vector_db_ids():
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("SELECT DISTINCT vector_db_id FROM files")
+    vector_db_ids = cursor.fetchall()
+
+    cursor.close()
+    conn.close()
+
+    return [vector_db_id[0] for vector_db_id in vector_db_ids]
 
 @app.post("/api/v1/query")
 async def query_rag_endpoint(request: QueryRequest, vector_db_id: str = Query(...)):
