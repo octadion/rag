@@ -108,14 +108,16 @@ def clear_database(vector_db_id: str):
     cursor = conn.cursor()
 
     cursor.execute("SELECT vector_db_location FROM files WHERE vector_db_id = %s", (vector_db_id,))
-    vector_db_location = cursor.fetchone()
+    result = cursor.fetchone()
 
-    if vector_db_location is None:
+    if result is None:
         cursor.close()
         conn.close()
         raise HTTPException(status_code=404, detail="Vector DB location not found")
 
-    folder_path = vector_db_location[0]
+    vector_db_location = result[0]
+    folder_path = os.path.dirname(vector_db_location)
+
     if os.path.isdir(folder_path):
         shutil.rmtree(folder_path)
     else:
