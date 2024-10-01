@@ -1,15 +1,18 @@
 from fastapi import FastAPI, HTTPException, Query, BackgroundTasks, UploadFile, File, Path
 from typing import List
 from pydantic import BaseModel
+from langchain_core.messages import AIMessage
 from vector_db import load_documents, split_documents, add_to_chroma, clear_database
 from query import query_rag
 from dotenv import load_dotenv
+import json
 import os, shutil, psycopg2, uuid
 
 load_dotenv()
 
 CHUNK_PATH = "data"
 USER_ID = "test"
+DATA_PATH = "data"
 
 app = FastAPI()
 
@@ -26,76 +29,55 @@ class QueryRequest(BaseModel):
 
 class ResetDatabaseRequest(BaseModel):
     reset: bool = False
-    
-@app.post("/api/v1/reset-database")
-async def reset_database(request: ResetDatabaseRequest, rag_id: str = Query(...)):
-    if request.reset:
-        conn = get_db_connection()
-        cursor = conn.cursor()
 
-        cursor.execute("SELECT DISTINCT vector_db_id FROM files WHERE rag_id = %s", (rag_id,))
-        result = cursor.fetchone()
-        if not result:
-            cursor.close()
-            conn.close()
-            raise HTTPException(status_code=404, detail="RAG ID not found")
-
-        vector_db_id = result[0]
-        
-        cursor.close()
-        conn.close()
-
-        clear_database(vector_db_id)
-        return {"message": f"Database cleared for rag_id {rag_id}", "vector_db_id": vector_db_id}
-
-    return {"message": "Reset flag not set", "rag_id": rag_id}
 
 @app.post("/api/v1/update-database")
-async def update_database(rag_id: str = Query(...), files: List[UploadFile] = File(...)):
+async def update_database(tenant_id: str = Query(...), assistant_id: str = Query(...), files: List[UploadFile] = File(...)):
     conn = get_db_connection()
     cursor = conn.cursor()
 
-    cursor.execute("SELECT DISTINCT user_id, vector_db_id, vector_db_location FROM files WHERE rag_id = %s", (rag_id,))
+    cursor.execute("SELECT vector_db_location FROM files WHERE tenant_id = %s AND assistant_id = %s LIMIT 1", (tenant_id, assistant_id))
     result = cursor.fetchone()
+    
     if not result:
         cursor.close()
         conn.close()
-        raise HTTPException(status_code=404, detail="RAG ID not found")
+        raise HTTPException(status_code=404, detail="Assistant ID not found for the given tenant")
 
-    user_id, vector_db_id, vector_db_location = result
-    
-    rag_folder = os.path.join(user_id, rag_id)
-    
+    vector_db_location = result[0]
+
+    tenant_folder = os.path.join(DATA_PATH, tenant_id)
+    assistant_folder = os.path.join(tenant_folder, assistant_id)
+
     file_ids = []
     for file in files:
         file_id = str(uuid.uuid4())
         file_ids.append(file_id)
-        
-        file_id_folder = os.path.join(rag_folder, file_id)
-        
-        file_location = os.path.join(file_id_folder, file.filename)
-        
-        os.makedirs(file_id_folder, exist_ok=True)
+
+        file_folder = os.path.join(assistant_folder, file_id)
+        file_location = os.path.join(file_folder, file.filename)
+
+        os.makedirs(file_folder, exist_ok=True)
         
         with open(file_location, "wb") as f:
             shutil.copyfileobj(file.file, f)
 
         cursor.execute(
             """
-            INSERT INTO files (id, file_name, file_location, vector_db_id, vector_db_location, rag_id, user_id)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            INSERT INTO files (id, file_name, file_location, assistant_id, vector_db_location, tenant_id)
+            VALUES (%s, %s, %s, %s, %s, %s)
             """,
-            (file_id, file.filename, file_location, vector_db_id, vector_db_location, rag_id, user_id)
+            (file_id, file.filename, file_location, assistant_id, vector_db_location, tenant_id)
         )
         conn.commit()
 
     cursor.close()
     conn.close()
 
-    all_file_locations = [os.path.join(rag_folder, file_id, file.filename) for file_id, file in zip(file_ids, files)]
-    run_update_database_multi(all_file_locations, vector_db_id, vector_db_location)
+    all_file_locations = [os.path.join(assistant_folder, file_id, file.filename) for file_id, file in zip(file_ids, files)]
+    run_update_database_multi(all_file_locations, assistant_id, vector_db_location)
 
-    return {"message": "Files uploaded and database update initiated", "rag_id": rag_id, "vector_db_id": vector_db_id}
+    return {"message": "Files uploaded and database update initiated", "tenant_id": tenant_id, "assistant_id": assistant_id}
 
 def run_update_database(file_name, file_id, file_location, vector_db_id, vector_db_location):
     try:
@@ -116,50 +98,44 @@ def run_update_database(file_name, file_id, file_location, vector_db_id, vector_
         conn.close()
     except Exception as e:
         print(f"Error updating database: {e}")
-
-# @app.post("/api/v1/upload-file")
-# async def upload_file(file: UploadFile = File(...)):
-#     file_id = str(uuid.uuid4())
-#     vector_db_id = str(uuid.uuid4())
-
-#     file_folder = os.path.join(CHUNK_PATH, file_id)
-#     vector_db_folder = os.path.join(CHUNK_PATH, vector_db_id)
-    
-#     file_location = os.path.join(file_folder, file.filename)
-#     vector_db_location = os.path.join(vector_db_folder, "CHROMA")
-
-#     os.makedirs(file_folder, exist_ok=True)
-#     os.makedirs(vector_db_folder, exist_ok=True)
-
-#     with open(file_location, "wb") as f:
-#         shutil.copyfileobj(file.file, f)
-    
-#     if file.filename.endswith('.pdf'):
-#         run_update_database(file.filename, file_id, file_location, vector_db_id, vector_db_location)
-#         return {"message": "File uploaded and database update initiated"}
-#     else:
-#         return {"message": "File uploaded but not processed. Only PDF files are supported."}
     
 @app.post("/api/v1/upload-files")
-async def upload_files(files: List[UploadFile] = File(...)):
-    rag_id = str(uuid.uuid4())
+async def upload_files(tenant_id: str = Query(...), files: List[UploadFile] = File(...)):
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("SELECT id FROM assistants WHERE tenant_id = %s LIMIT 1", (tenant_id,))
+    result = cursor.fetchone()
+
+    if result:
+        assistant_id = result[0]
+    else:
+        assistant_id = str(uuid.uuid4())
+        cursor.execute(
+            """
+            INSERT INTO assistants (id, tenant_id)
+            VALUES (%s, %s)
+            """, 
+            (assistant_id, tenant_id)
+        )
+        conn.commit()
+
+    cursor.close()
+    conn.close()
+
+    tenant_folder = os.path.join(DATA_PATH, tenant_id)
+    assistant_folder = os.path.join(tenant_folder, assistant_id)
+    vector_db_location = os.path.join(assistant_folder, "CHROMA")
     
-    rag_folder = os.path.join(USER_ID, rag_id)
-    
-    os.makedirs(rag_folder, exist_ok=True)
-    
-    vector_db_id = str(uuid.uuid4())
-    vector_db_folder = os.path.join(rag_folder, vector_db_id)
-    vector_db_location = os.path.join(vector_db_folder, "CHROMA")
-    
-    os.makedirs(vector_db_folder, exist_ok=True)
+    os.makedirs(vector_db_location, exist_ok=True)
 
     file_ids = []
     for file in files:
         file_id = str(uuid.uuid4())
         file_ids.append(file_id)
 
-        file_folder = os.path.join(rag_folder, file_id)
+        file_folder = os.path.join(assistant_folder, file_id)
         file_location = os.path.join(file_folder, file.filename)
 
         os.makedirs(file_folder, exist_ok=True)
@@ -171,21 +147,21 @@ async def upload_files(files: List[UploadFile] = File(...)):
         cursor = conn.cursor()
         cursor.execute(
             """
-            INSERT INTO files (id, file_name, file_location, vector_db_id, vector_db_location, user_id, rag_id)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            INSERT INTO files (id, file_name, file_location, assistant_id, vector_db_location, tenant_id)
+            VALUES (%s, %s, %s, %s, %s, %s)
             """,
-            (file_id, file.filename, file_location, vector_db_id, vector_db_location, USER_ID, rag_id)
+            (file_id, file.filename, file_location, assistant_id, vector_db_location, tenant_id)
         )
         conn.commit()
         cursor.close()
         conn.close()
 
-    all_file_locations = [os.path.join(rag_folder, file_id, file.filename) for file_id, file in zip(file_ids, files)]
-    run_update_database_multi(all_file_locations, vector_db_id, vector_db_location)
+    all_file_locations = [os.path.join(assistant_folder, file_id, file.filename) for file_id, file in zip(file_ids, files)]
+    run_update_database_multi(all_file_locations, assistant_id, vector_db_location)
 
-    return {"message": "Files uploaded and database update initiated", "user_id": USER_ID, "rag_id": rag_id, "vector_db_id": vector_db_id}
+    return {"message": "Files uploaded and database update initiated", "tenant_id": tenant_id, "assistant_id": assistant_id}
 
-def run_update_database_multi(file_locations, vector_db_id, vector_db_location):
+def run_update_database_multi(file_locations, assistant_id, vector_db_location):
     try:
         all_documents = []
         for file_location in file_locations:
@@ -199,20 +175,20 @@ def run_update_database_multi(file_locations, vector_db_id, vector_db_location):
         print(f"Error updating database: {e}")
     
 @app.delete("/api/v1/delete-file/{file_id}")
-async def delete_file(file_id: str = Path(...), rag_id: str = Query(...)):
+async def delete_file(file_id: str = Path(...), tenant_id: str = Query(...), assistant_id: str = Query(...)):
     conn = get_db_connection()
     cursor = conn.cursor()
 
     cursor.execute(
-        "SELECT file_location, vector_db_location FROM files WHERE id = %s AND rag_id = %s",
-        (file_id, rag_id)
+        "SELECT file_location, vector_db_location FROM files WHERE id = %s AND tenant_id = %s AND assistant_id = %s",
+        (file_id, tenant_id, assistant_id)
     )
     result = cursor.fetchone()
 
     if result is None:
         cursor.close()
         conn.close()
-        raise HTTPException(status_code=404, detail="File not found or rag_id mismatch")
+        raise HTTPException(status_code=404, detail="File not found or mismatch in tenant_id or assistant_id")
 
     file_location, vector_db_location = result
 
@@ -223,20 +199,20 @@ async def delete_file(file_id: str = Path(...), rag_id: str = Query(...)):
     if os.path.isdir(file_id_folder):
         shutil.rmtree(file_id_folder)
 
-    cursor.execute("DELETE FROM files WHERE id = %s AND rag_id = %s", (file_id, rag_id))
+    cursor.execute("DELETE FROM files WHERE id = %s AND tenant_id = %s AND assistant_id = %s", (file_id, tenant_id, assistant_id))
     conn.commit()
 
     cursor.close()
     conn.close()
 
-    return {"message": f"File and associated folder {file_id} deleted successfully"}
+    return {"message": f"File {file_id} and its associated folder deleted successfully"}
 
-@app.get("/api/v1/list-files", response_model=List[str])
-async def list_files():
+@app.get("/api/v1/list-files")
+async def list_files(tenant_id: str = Query(...), assistant_id: str = Query(...)):
     conn = get_db_connection()
     cursor = conn.cursor()
 
-    cursor.execute("SELECT id, file_name FROM files")
+    cursor.execute("SELECT id, file_name FROM files WHERE tenant_id = %s AND assistant_id = %s", (tenant_id, assistant_id))
     files = cursor.fetchall()
 
     cursor.close()
@@ -244,60 +220,136 @@ async def list_files():
 
     return [f"{file_id}: {file_name}" for file_id, file_name in files]
 
-@app.get("/api/v1/list-vector-db-ids", response_model=List[str])
-async def list_vector_db_ids():
+@app.get("/api/v1/list-assistant-ids")
+async def list_assistant_ids(tenant_id: str = Query(...)):
     conn = get_db_connection()
     cursor = conn.cursor()
 
-    cursor.execute("SELECT DISTINCT vector_db_id FROM files")
-    vector_db_ids = cursor.fetchall()
+    cursor.execute("SELECT DISTINCT assistant_id FROM files WHERE tenant_id = %s", (tenant_id,))
+    assistant_ids = cursor.fetchall()
 
     cursor.close()
     conn.close()
 
-    return [vector_db_id[0] for vector_db_id in vector_db_ids]
+    return [assistant_id[0] for assistant_id in assistant_ids]
 
-@app.get("/api/v1/list-rag-ids", response_model=List[str])
-async def list_rag_ids():
+@app.post("/api/v1/create-thread")
+async def create_thread(tenant_id: str = Query(...), assistant_id: str = Query(...)):
+    thread_id = str(uuid.uuid4())
+    
     conn = get_db_connection()
     cursor = conn.cursor()
-
-    cursor.execute("SELECT DISTINCT rag_id FROM files")
-    rag_ids = cursor.fetchall()
-
+    
+    cursor.execute(
+        """
+        INSERT INTO threads (id, assistant_id, tenant_id)
+        VALUES (%s, %s, %s)
+        """,
+        (thread_id, assistant_id, tenant_id)
+    )
+    conn.commit()
     cursor.close()
     conn.close()
 
-    return [rag_id[0] for rag_id in rag_ids]
+    return {"message": "Thread created", "tenant_id": tenant_id, "assistant_id": assistant_id, "thread_id": thread_id}
 
 @app.post("/api/v1/query")
-async def query_rag_endpoint(request: QueryRequest, rag_id: str = Query(...)):
-    if not rag_id:
-        raise HTTPException(status_code=400, detail="RAG ID must be provided")
+async def query_rag_endpoint(request: QueryRequest, tenant_id: str = Query(...), assistant_id: str = Query(...), thread_id: str = Query(None)):
+    if not assistant_id:
+        raise HTTPException(status_code=400, detail="Assistant ID must be provided")
     
     conn = get_db_connection()
     cursor = conn.cursor()
 
-    cursor.execute("SELECT vector_db_id FROM files WHERE rag_id = %s LIMIT 1", (rag_id,))
+    cursor.execute("SELECT vector_db_location FROM files WHERE tenant_id = %s AND assistant_id = %s LIMIT 1", (tenant_id, assistant_id))
     vector_db_result = cursor.fetchone()
     
     if not vector_db_result:
         cursor.close()
         conn.close()
-        raise HTTPException(status_code=404, detail="RAG ID not found")
+        raise HTTPException(status_code=404, detail="Assistant ID not found")
     
-    vector_db_id = vector_db_result[0]
+    vector_db_location = vector_db_result[0]
 
-    cursor.execute("SELECT vector_db_location FROM files WHERE vector_db_id = %s LIMIT 1", (vector_db_id,))
-    vector_db_location = cursor.fetchone()
+    if not thread_id:
+        thread_id = str(uuid.uuid4())
+
+        cursor.execute(
+            """
+            INSERT INTO threads (id, assistant_id, tenant_id, created_at)
+            VALUES (%s, %s, %s, NOW())
+            """,
+            (thread_id, assistant_id, tenant_id)
+        )
+        conn.commit()
+
+    result = query_rag(request.query_text, assistant_id, thread_id)
+    assistant_response = result["response"].content if isinstance(result["response"], AIMessage) else result["response"]
+
+    combined_message = [
+        {"content": request.query_text, "role": "user"},
+        {"content": assistant_response, "role": "assistant"}
+    ]
+
+    message_id = str(uuid.uuid4())
+    cursor.execute(
+        """
+        INSERT INTO messages (id, thread_id, assistant_id, tenant_id, message_text, created_at)
+        VALUES (%s, %s, %s, %s, %s, NOW())
+        """,
+        (message_id, thread_id, assistant_id, tenant_id, json.dumps(combined_message))
+    )
+    conn.commit()
+
     cursor.close()
     conn.close()
 
-    if not vector_db_location:
-        raise HTTPException(status_code=404, detail="Vector DB ID not found for the given RAG ID")
-    
-    result = query_rag(request.query_text, vector_db_id)
-    return result
+    return {
+        "message": "Query executed",
+        "result": result,
+        "thread_id": thread_id
+    }
+
+@app.delete("/api/v1/delete-assistant/{assistant_id}")
+async def delete_assistant(assistant_id: str = Path(...), tenant_id: str = Query(...)):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("SELECT vector_db_location FROM files WHERE tenant_id = %s AND assistant_id = %s LIMIT 1", (tenant_id, assistant_id))
+    result = cursor.fetchone()
+
+    if not result:
+        cursor.close()
+        conn.close()
+        raise HTTPException(status_code=404, detail="Assistant ID not found for the given tenant")
+
+    vector_db_location = result[0]
+
+    cursor.execute("SELECT file_location FROM files WHERE tenant_id = %s AND assistant_id = %s", (tenant_id, assistant_id))
+    file_results = cursor.fetchall()
+
+    for file_result in file_results:
+        file_location = file_result[0]
+        if os.path.exists(file_location):
+            os.remove(file_location)
+
+        file_id_folder = os.path.dirname(file_location)
+        if os.path.isdir(file_id_folder):
+            shutil.rmtree(file_id_folder)
+
+    if os.path.isdir(vector_db_location):
+        shutil.rmtree(vector_db_location)
+
+    cursor.execute("DELETE FROM files WHERE tenant_id = %s AND assistant_id = %s", (tenant_id, assistant_id))
+    conn.commit()
+
+    cursor.execute("DELETE FROM assistants WHERE tenant_id = %s AND id = %s", (tenant_id, assistant_id))
+    conn.commit()
+
+    cursor.close()
+    conn.close()
+
+    return {"message": f"Assistant {assistant_id} and all related data deleted successfully"}
 
 if __name__ == "__main__":
     import uvicorn
