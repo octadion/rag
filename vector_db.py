@@ -7,6 +7,7 @@ from langchain.schema.document import Document
 from embedding import get_embedding_function
 from langchain.vectorstores.chroma import Chroma
 from fastapi import HTTPException
+from typing import List
 import psycopg2
 def get_db_connection():
     return psycopg2.connect(
@@ -38,7 +39,7 @@ def load_documents(file_location: str):
     return document_loader.load()
 
 
-def split_documents(documents: list[Document]):
+def split_documents(documents: List[Document]):
     text_splitter = RecursiveCharacterTextSplitter(
         chunk_size=800,
         chunk_overlap=80,
@@ -68,7 +69,7 @@ def calculate_chunk_ids(chunks):
 
     return chunks
 
-def add_to_chroma(chunks: list[Document], vector_db_location: str):
+def add_to_chroma(chunks: List[Document], vector_db_location: str):
     try:
         db = Chroma(
             persist_directory=vector_db_location, embedding_function=get_embedding_function()

@@ -105,21 +105,16 @@ async def upload_files(tenant_id: str = Query(...), files: List[UploadFile] = Fi
     conn = get_db_connection()
     cursor = conn.cursor()
 
-    cursor.execute("SELECT id FROM assistants WHERE tenant_id = %s LIMIT 1", (tenant_id,))
-    result = cursor.fetchone()
+    assistant_id = str(uuid.uuid4())
 
-    if result:
-        assistant_id = result[0]
-    else:
-        assistant_id = str(uuid.uuid4())
-        cursor.execute(
-            """
-            INSERT INTO assistants (id, tenant_id)
-            VALUES (%s, %s)
-            """, 
-            (assistant_id, tenant_id)
-        )
-        conn.commit()
+    cursor.execute(
+        """
+        INSERT INTO assistants (id, tenant_id)
+        VALUES (%s, %s)
+        """, 
+        (assistant_id, tenant_id)
+    )
+    conn.commit()
 
     cursor.close()
     conn.close()
