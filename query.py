@@ -97,16 +97,6 @@ def query_rag(query_text: str, assistant_id: str, thread_id: str):
 
     combined_context = f"{previous_context}\nUser: {query_text}"
 
-    classification_response = None
-    if len(previous_messages) == 4:
-
-        formatted_input = [{"content": f"{msg[0]}", "role": "user"} for msg in previous_messages]
-        formatted_input.append({"content": query_text, "role": "user"})
-        
-        input_data = InputData(input=formatted_input)
-
-        classification_response = generate_response(input_data)
-
     embedding_function = get_embedding_function()
     db = Chroma(persist_directory=vector_db_location[0], embedding_function=embedding_function)
 
@@ -127,7 +117,59 @@ def query_rag(query_text: str, assistant_id: str, thread_id: str):
     
     return {
         "response": response_text,
-        "sources": sources,
-        "classification": classification_response if classification_response else "No classification (less than 4 messages)"
+        "sources": sources
     }
 
+def classification_workflow(query_text: str, assistant_id: str, thread_id: str):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        SELECT message_text 
+        FROM messages 
+        WHERE thread_id = %s 
+        ORDER BY created_at DESC 
+        LIMIT 6
+        """, 
+        (thread_id,)
+    )
+
+    previous_messages = cursor.fetchall()
+
+    if len(previous_messages) >= 10:
+        previous_messages.reverse()
+        formatted_input = [{"content": f"{msg[0]}", "role": "user"} for msg in previous_messages]
+        formatted_input.append({"content": query_text, "role": "user"})
+
+        input_data = InputData(input=formatted_input)
+        classification_response = generate_response(input_data)
+
+        cursor.close()
+        conn.close()
+
+        return {
+            "response": classification_response,
+            "classification": "Classification Response Generated"
+        }
+    else:
+        regular_llm = ChatOllama(model="llama3.1:latest", temperature=0, base_url=os.getenv('OLLAMA_BASE_URL'))
+        
+        regular_prompt = PromptTemplate.from_template(
+            """Anda adalah assistant AI dari Maxchat, Maxchat merupakan WhatsApp Business Solutions Provider (BSP WA) untuk penyedia layanan WhatsApp API Official dan Omnichannel, jika ada pertanyaan, jawab sebaik mungkin sebagai Assistant AI Maxchat, jika ada pertanyaan terkait produk atau hal spesifik, berikan kontak maxchat: 0812-3451-1449 dan halo@maxchat.id
+            {input}"""
+        )
+
+        formatted_input = "\n".join([f'{msg[0]}' for msg in previous_messages])
+        formatted_input += f"\n{query_text}"
+        
+        chain = regular_prompt | regular_llm | output_parser
+        regular_response = chain.invoke({"input": formatted_input})
+
+        cursor.close()
+        conn.close()
+
+        return {
+            "response": regular_response,
+            "classification": "Regular Response Generated"
+        }

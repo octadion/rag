@@ -1,12 +1,13 @@
 from fastapi import FastAPI, HTTPException, Query, BackgroundTasks, UploadFile, File, Path
-from typing import List
+from typing import List, Optional
 from pydantic import BaseModel
 from langchain_core.messages import AIMessage
 from vector_db import load_documents, split_documents, add_to_chroma, clear_database
-from query import query_rag
+from query import query_rag, classification_workflow
 from dotenv import load_dotenv
 import json
 import os, shutil, psycopg2, uuid
+from datetime import datetime, timezone
 
 load_dotenv()
 
@@ -30,6 +31,14 @@ class QueryRequest(BaseModel):
 class ResetDatabaseRequest(BaseModel):
     reset: bool = False
 
+class AssistantCreateRequest(BaseModel):
+    tenant_id: str
+    vector_db_location: Optional[str] = None
+    llm_model: Optional[str] = None
+    llm_provider: Optional[str] = None
+    embedding_model: Optional[str] = None
+    embedding_provider: Optional[str] = None
+    type: Optional[str] = None
 
 @app.post("/api/v1/update-database")
 async def update_database(tenant_id: str = Query(...), assistant_id: str = Query(...), files: List[UploadFile] = File(...)):
@@ -99,30 +108,68 @@ def run_update_database(file_name, file_id, file_location, vector_db_id, vector_
     except Exception as e:
         print(f"Error updating database: {e}")
     
-@app.post("/api/v1/upload-files")
-async def upload_files(tenant_id: str = Query(...), files: List[UploadFile] = File(...)):
+@app.post("/api/v1/assistants")
+async def create_assistant(request: AssistantCreateRequest):
+    assistant_id = str(uuid.uuid4())
 
     conn = get_db_connection()
     cursor = conn.cursor()
 
-    assistant_id = str(uuid.uuid4())
+    created_at = datetime.now(timezone.utc)
+
 
     cursor.execute(
         """
-        INSERT INTO assistants (id, tenant_id)
-        VALUES (%s, %s)
-        """, 
+        INSERT INTO assistants (id, tenant_id, vector_db_location, created_at, llm_model, llm_provider, embedding_model, embedding_provider, type)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """,
+        (assistant_id, request.tenant_id, None, created_at, 
+         request.llm_model, request.llm_provider, request.embedding_model, 
+         request.embedding_provider, request.type)
+    )
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+    return {"assistant_id": assistant_id, "message": "Assistant created successfully"}
+
+@app.post("/api/v1/upload-files")
+async def upload_files(
+    tenant_id: str = Query(...),
+    assistant_id: str = Query(...),
+    files: List[UploadFile] = File(...)
+):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        SELECT id FROM assistants WHERE id = %s AND tenant_id = %s
+        """,
         (assistant_id, tenant_id)
+    )
+    if cursor.fetchone() is None:
+        cursor.close()
+        conn.close()
+        return {"error": "Assistant ID not found or does not belong to the specified tenant"}
+
+    tenant_folder = os.path.join(DATA_PATH, tenant_id)
+    assistant_folder = os.path.join(tenant_folder, assistant_id)
+    vector_db_location = os.path.join(assistant_folder, "CHROMA")
+
+    cursor.execute(
+        """
+        UPDATE assistants
+        SET vector_db_location = %s
+        WHERE id = %s AND tenant_id = %s
+        """,
+        (vector_db_location, assistant_id, tenant_id)
     )
     conn.commit()
 
     cursor.close()
     conn.close()
 
-    tenant_folder = os.path.join(DATA_PATH, tenant_id)
-    assistant_folder = os.path.join(tenant_folder, assistant_id)
-    vector_db_location = os.path.join(assistant_folder, "CHROMA")
-    
     os.makedirs(vector_db_location, exist_ok=True)
 
     file_ids = []
@@ -256,19 +303,18 @@ async def query_rag_endpoint(request: QueryRequest, tenant_id: str = Query(...),
     conn = get_db_connection()
     cursor = conn.cursor()
 
-    cursor.execute("SELECT vector_db_location FROM files WHERE tenant_id = %s AND assistant_id = %s LIMIT 1", (tenant_id, assistant_id))
-    vector_db_result = cursor.fetchone()
+    cursor.execute("SELECT type FROM assistants WHERE id = %s AND tenant_id = %s", (assistant_id, tenant_id))
+    assistant_type_result = cursor.fetchone()
     
-    if not vector_db_result:
+    if not assistant_type_result:
         cursor.close()
         conn.close()
         raise HTTPException(status_code=404, detail="Assistant ID not found")
-    
-    vector_db_location = vector_db_result[0]
+
+    assistant_type = assistant_type_result[0]
 
     if not thread_id:
         thread_id = str(uuid.uuid4())
-
         cursor.execute(
             """
             INSERT INTO threads (id, assistant_id, tenant_id, created_at)
@@ -278,8 +324,16 @@ async def query_rag_endpoint(request: QueryRequest, tenant_id: str = Query(...),
         )
         conn.commit()
 
-    result = query_rag(request.query_text, assistant_id, thread_id)
-    assistant_response = result["response"].content if isinstance(result["response"], AIMessage) else result["response"]
+    if assistant_type == "rag":
+        workflow_result = query_rag(request.query_text, assistant_id, thread_id)
+    elif assistant_type == "classification":
+        workflow_result = classification_workflow(request.query_text, assistant_id, thread_id)
+    else:
+        cursor.close()
+        conn.close()
+        raise HTTPException(status_code=400, detail=f"Unsupported assistant type: {assistant_type}")
+    
+    assistant_response = workflow_result["response"].content if isinstance(workflow_result["response"], AIMessage) else workflow_result["response"]
 
     combined_message = [
         {"content": request.query_text, "role": "user"},
@@ -298,10 +352,10 @@ async def query_rag_endpoint(request: QueryRequest, tenant_id: str = Query(...),
 
     cursor.close()
     conn.close()
-
+    print(workflow_result)
     return {
         "message": "Query executed",
-        "result": result,
+        "result": workflow_result,
         "thread_id": thread_id
     }
 
