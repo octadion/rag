@@ -3,9 +3,12 @@ from server.database.db import get_db_connection
 from fastapi import HTTPException
 from server.utils.prompts import prompt
 from langchain_community.chat_models import ChatOllama
-import os
 from langchain.prompts import PromptTemplate
 from langchain_core.output_parsers import StrOutputParser
+from dotenv import load_dotenv
+import os
+
+load_dotenv()
 
 classification_llm = ChatOllama(model='llama3:8b-maxchat', temperature=0, base_url=os.getenv('OLLAMA_BASE_URL'))
 
