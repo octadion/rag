@@ -8,3 +8,4 @@ fastapi
 python-dotenv
 python-multipart
 psycopg2
+bs4

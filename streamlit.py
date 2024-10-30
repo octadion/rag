@@ -4,7 +4,7 @@ import pandas as pd
 import psycopg2
 from psycopg2.extras import RealDictCursor
 import os, json
-
+st.set_page_config(page_title="maxchat",)
 def create_connection():
     conn = psycopg2.connect(
         dbname=os.getenv("POSTGRES_DBNAME"),
@@ -57,7 +57,7 @@ def get_messages(thread_id):
     return flattened_messages
 
 def send_message(thread_id, assistant_id, tenant_id, query_text):
-    base_url = "http://localhost:8501/api/v1/query"
+    base_url = "http://localhost:8000/api/v1/query"
     url = f"{base_url}?assistant_id=83a78f36-2b72-4432-b197-881be8457fa4&tenant_id=2"
     
     if thread_id:

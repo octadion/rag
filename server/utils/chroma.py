@@ -2,24 +2,17 @@ import argparse
 import os
 import shutil
 from langchain.document_loaders.pdf import PyPDFDirectoryLoader
+from langchain_community.document_loaders import WebBaseLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain.schema.document import Document
-from embedding import get_embedding_function
+from server.utils.embedding import get_embedding_function
 from langchain.vectorstores.chroma import Chroma
 from fastapi import HTTPException
 from typing import List
-import psycopg2
-def get_db_connection():
-    return psycopg2.connect(
-        dbname=os.getenv("POSTGRES_DBNAME"),
-        user=os.getenv("POSTGRES_USER"),
-        password=os.getenv("POSTGRES_PASSWORD"),
-        host=os.getenv("POSTGRES_HOST"),
-        port=os.getenv("POSTGRES_PORT")
-    )
+from server.database.db import get_db_connection
+
 CHROMA_PATH = "chroma"
 DATA_PATH = "data"
-
 
 def main():
     parser = argparse.ArgumentParser()
@@ -37,6 +30,10 @@ def main():
 def load_documents(file_location: str):
     document_loader = PyPDFDirectoryLoader(file_location)
     return document_loader.load()
+
+def load_documents_webbase(url: str):
+    docs = WebBaseLoader(url)
+    return docs.load()
 
 
 def split_documents(documents: List[Document]):
@@ -129,7 +126,6 @@ def clear_database(vector_db_id: str):
 
     cursor.close()
     conn.close()
-
 
 if __name__ == "__main__":
     main()
